@@ -4750,6 +4750,75 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_q_answer(q, "Opción inválida.", show_alert=True)
         return
+    
+    if data.startswith("DOC_OK|") or data.startswith("DOC_BAD|"):
+        parts = data.split("|")
+        action = parts[0]
+        id_orden = int(parts[1])
+        doc_tipo = parts[2]
+
+        order_row = get_order(id_orden)
+        if not order_row or order_row["status"] != ORDER_STATUS_OPEN:
+            await safe_q_answer(q, "Orden no válida o cerrada.", show_alert=True)
+            return
+
+        member = await context.bot.get_chat_member(chat_id, user_id)
+        if member.status not in ("administrator", "creator"):
+            await safe_q_answer(
+                q,
+                "⚠️ Solo un administrador puede aprobar o rechazar documentos.",
+                show_alert=True
+            )
+            return
+
+        if action == "DOC_BAD":
+            update_order(
+                id_orden,
+                phase=PHASE_WAIT_PERSONA_ATIENDE,
+                admin_pending=0,
+                pending_step_no=None,
+                current_step_no=None,
+            )
+
+            await safe_q_answer(q, "❌ Documento rechazado", show_alert=False)
+            await safe_edit_message_text(q, f"❌ Documento rechazado: {doc_tipo}")
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="PERSONA QUE ATIENDE\nSelecciona una opción:",
+                reply_markup=kb_persona_atiende(),
+            )
+            return
+
+        await safe_q_answer(q, "✅ Documento aprobado", show_alert=False)
+        await safe_edit_message_text(q, f"✅ Documento aprobado: {doc_tipo}")
+
+        if doc_tipo == "ENCARGADO":
+            update_order(
+                id_orden,
+                phase=PHASE_WAIT_DOC_CLIENTE,
+                admin_pending=0,
+            )
+
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="CARGAR DOCUMENTO DEL CLIENTE\nEnvía la foto del documento del cliente."
+            )
+            return
+
+        update_order(
+            id_orden,
+            phase=PHASE_MENU_EVID,
+            pending_step_no=None,
+            current_step_no=None,
+            admin_pending=0,
+        )
+
+        enqueue_orden_row(id_orden)
+
+        order_row2 = get_order(id_orden)
+        await show_evidence_menu(chat_id, context, order_row2)
+        return
 
     if data.startswith("EVID|"):
         try:
@@ -5220,6 +5289,36 @@ async def on_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await show_evidence_menu(chat_id, context, order_row2)
             return
+
+        mark_submitted(id_orden, step_no, attempt)
+        update_order(
+            id_orden,
+            phase=PHASE_STEP_REVIEW,
+            pending_step_no=step_no,
+            current_step_no=step_no,
+            admin_pending=1,
+        )
+        clear_route_lock(int(route_row["id_ruta"]))
+
+        await safe_q_answer(q, "📨 Enviado a revisión", show_alert=False)
+        await safe_edit_message_text(q, "📨 Evidencias enviadas a revisión.")
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"📸 **Revisión de evidencia**\n"
+                f"Paso: {title}\n"
+                f"Intento: {attempt}\n"
+                f"Técnico: {order_row['technician_name'] or '-'}\n"
+                f"Servicio: {order_row['service_type'] or '-'}\n"
+                f"Abonado: {order_row['abonado_code'] or '-'}\n"
+                f"Fotos: {count}\n\n"
+                "Admins: validar con ✅/❌"
+            ),
+            parse_mode="Markdown",
+            reply_markup=kb_review_step(id_orden, step_no, attempt),
+        )
+        return
 
     if data.startswith("ALT_FINAL_OK|") or data.startswith("ALT_FINAL_BAD|"):
         try:
